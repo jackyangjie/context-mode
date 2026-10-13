@@ -30,9 +30,12 @@ import { extractEvents, extractUserEvents, parseOpencodeUsage, buildAgentUsageEv
 import type { HookInput } from "../../session/extract.js";
 import { buildResumeSnapshot } from "../../session/snapshot.js";
 import type { SessionEvent } from "../../types.js";
-import { AdapterPlatformType, OpenCodeAdapter } from "./index.js";
+import { OpenCodeAdapter } from "./index.js";
+import type { AdapterPlatformType } from "./index.js";
 import { PLATFORM_ENV_VARS } from "../detect.js";
 import { zod3ShapeToV4 } from "./zod3tov4.js";
+import { ROUTING_MARKERS, systemHasRoutingInstructionsV1 as systemHasRoutingInstructions } from "./routing-utils.js";
+import { ContextModePluginV2 } from "./plugin-v2.js";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -201,29 +204,9 @@ function isSyntheticMessage(text: string): boolean {
 }
 
 // ── Helpers ───────────────────────────────────────────────
-
-// Quorum markers — must NOT be substrings of each other (#487).
-// Each token uniquely identifies the routing block / context-mode rules
-// without overlapping any other marker. The XML tag is the primary signal;
-// the two distinctive bare tool names are the secondary signals. Together
-// any 2 of 3 confirm the system prompt already carries routing instructions.
-const ROUTING_MARKERS = [
-  "<context_window_protection>",
-  "ctx_search",
-  "ctx_index",
-];
-
-function systemHasRoutingInstructions(system: string[]): boolean {
-  const text = system.join("\n");
-  // Word-boundary check guards against unrelated identifiers that happen to
-  // share a prefix/suffix (e.g. a hypothetical `ctx_search_v2`).
-  const wordBoundary = (m: string) => {
-    if (m.startsWith("<")) return text.includes(m);
-    const re = new RegExp(`(?:^|\\W)${m.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}(?:\\W|$)`);
-    return re.test(text);
-  };
-  return ROUTING_MARKERS.filter(wordBoundary).length >= 2;
-}
+// ROUTING_MARKERS and systemHasRoutingInstructions are defined in
+// routing-utils.ts and re-exported below so existing unit tests that
+// import from `plugin.ts` keep working.
 
 /**
  * Detect whether the plugin is running under KiloCode or OpenCode.
@@ -752,9 +735,31 @@ async function createContextModePlugin(ctx: PluginContext) {
 }
 
 // ── Exports ──────────────────────────────────────────────
-// KiloCode PluginModule: default export with { server } shape
-// OpenCode compat: named export for direct import("context-mode/plugin")
-export default { id:"context-mode", server: createContextModePlugin };
+// Dual-stack entry point (OpenCode V1 + V2):
+//   - `server: createContextModePlugin` — V1 hook map for KiloCode and
+//     OpenCode ≥ 1.18.29 that still honours the object-entrypoint shape.
+//   - `setup(ctx)` (from plugin-v2.ts) — V2 hook surface for OpenCode v2
+//     loaders, which reject V1-only plugins with
+//     `PluginModule.LoadError: Plugin must export a default definition with
+//     an id and an effect or setup function`.
+//   - `id` — kept on the outer object so legacy readers that expect
+//     `{ id, server }` (KiloCode) still see it.
+//
+// V1 hook implementations remain untouched here. The V2 skeleton in
+// plugin-v2.ts currently covers only the `context` hook (ROUTING_BLOCK
+// injection); the remaining V1 hooks (tool.execute.before/after,
+// chat.message, experimental.session.compacting, tool map, event bus)
+// are being ported incrementally.
+//
+// Reference: https://opencode.ai/v2/docs/build/plugins/migrate-v1
+// ("Support V1 and V2 from one package") — the loader picks up whichever
+// entrypoint it understands and ignores the rest.
+export default {
+  ...ContextModePluginV2,
+  id: "context-mode",
+  server: createContextModePlugin,
+};
 export { createContextModePlugin as ContextModePlugin };
-// Test surface — exported for unit testing the quorum substring fix (#487).
-export { systemHasRoutingInstructions, ROUTING_MARKERS };
+// Re-export ROUTING_MARKERS from routing-utils.ts so unit tests that
+// import from `plugin.ts` (quorum substring fix #487) keep working.
+export { ROUTING_MARKERS, systemHasRoutingInstructions };
