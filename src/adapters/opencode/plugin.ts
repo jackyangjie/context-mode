@@ -745,11 +745,15 @@ async function createContextModePlugin(ctx: PluginContext) {
 //   - `id` — kept on the outer object so legacy readers that expect
 //     `{ id, server }` (KiloCode) still see it.
 //
-// V1 hook implementations remain untouched here. The V2 skeleton in
-// plugin-v2.ts currently covers only the `context` hook (ROUTING_BLOCK
-// injection); the remaining V1 hooks (tool.execute.before/after,
-// chat.message, experimental.session.compacting, tool map, event bus)
-// are being ported incrementally.
+// V1 hook implementations remain untouched here. The V2 surface in
+// plugin-v2.ts is now feature-complete: every V1 hook below has a v2
+// counterpart registered in `setup(ctx)` — tool map → ctx.tool.transform,
+// tool.execute.before/after → ctx.tool.hook, event → ctx.event.subscribe,
+// chat.message → ctx.session.hook("prompt"),
+// experimental.session.compacting → ctx.session.hook("compaction"), and
+// experimental.chat.system.transform → ctx.session.hook("context"). Each v2
+// hook body mirrors its V1 logic and degrades silently on a field-name
+// mismatch (the v2 event shapes are not exhaustively documented).
 //
 // Reference: https://opencode.ai/v2/docs/build/plugins/migrate-v1
 // ("Support V1 and V2 from one package") — the loader picks up whichever
