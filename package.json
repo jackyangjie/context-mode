@@ -24,9 +24,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/mksglu/context-mode"
+    "url": "git+https://github.com/jackyangjie/context-mode.git"
   },
-  "homepage": "https://github.com/mksglu/context-mode#readme",
+  "homepage": "https://github.com/jackyangjie/context-mode#readme",
   "pi": {
     "extensions": [
       "./build/adapters/pi/extension.js"
@@ -98,6 +98,7 @@
     "test:compare": "npx tsx tests/context-comparison.ts",
     "test:ecosystem": "npx tsx tests/ecosystem-benchmark.ts",
     "install:openclaw": "node -e \"if(process.platform==='win32'){console.error('OpenClaw install requires bash (Git Bash or WSL)');process.exit(1)}else{require('child_process').execSync('bash scripts/install-openclaw-plugin.sh',{stdio:'inherit'})}\"",
+    "prepare": "npm run build",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {
