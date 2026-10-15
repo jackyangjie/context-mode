@@ -174,6 +174,183 @@ describe("ContextModePluginV2 (opencode v2 setup)", () => {
     });
   });
 
+  // ── Degradation: a partial v2 context must not fail setup() ────────────
+  // OpenCode V2 does not expose a stable logging API to plugins, and the v2
+  // event shapes are not documented exhaustively. Both used to degrade
+  // silently; these tests pin the guard and the stderr warning.
+
+  describe("setup degradation", () => {
+    // Patches process.stderr.write before setup() so the captured lines can be
+    // asserted on. The plugin resolves process.stderr.write at call time, so
+    // patching the property is sufficient.
+    function captureStderr(): { lines: string[]; restore: () => void } {
+      const lines: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: unknown) => {
+        lines.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      return { lines, restore: () => { process.stderr.write = orig; } };
+    }
+
+    it("survives a missing ctx.session — setup resolves and warns", async () => {
+      const temp = join(tempDir, "no-session");
+      mkdirSync(temp, { recursive: true });
+      const { lines, restore } = captureStderr();
+      try {
+        const ctx: any = {
+          app: { version: "test-v2" },
+          location: { directory: temp, project: { id: "p", canonical: temp } },
+          options: {},
+          // ctx.session intentionally omitted
+          tool: {
+            async hook(name: string, handler: HookHandler) {
+              return { dispose: async () => {} };
+            },
+            async transform(editor: (editor: any) => void) {
+              editor({ add: () => {} });
+              return { dispose: async () => {} };
+            },
+          },
+          event: { subscribe() { return (async function* () {})(); } },
+        };
+        await expect(ContextModePluginV2.setup(ctx)).resolves.toBeTypeOf("function");
+      } finally {
+        restore();
+      }
+      const text = lines.join("");
+      expect(text).toContain("ctx.session.hook unavailable");
+    });
+
+    it("survives a throwing ctx.session.hook('context') — warns, does not reject", async () => {
+      const temp = join(tempDir, "hook-throw");
+      mkdirSync(temp, { recursive: true });
+      const { lines, restore } = captureStderr();
+      try {
+        const ctx: any = {
+          app: { version: "test-v2" },
+          location: { directory: temp, project: { id: "p", canonical: temp } },
+          options: {},
+          session: {
+            async hook(name: string, _handler: HookHandler) {
+              if (name === "context") throw new Error("boom");
+              return { dispose: async () => {} };
+            },
+          },
+          tool: {
+            async hook(name: string, _handler: HookHandler) {
+              return { dispose: async () => {} };
+            },
+            async transform(editor: (editor: any) => void) {
+              editor({ add: () => {} });
+              return { dispose: async () => {} };
+            },
+          },
+          event: { subscribe() { return (async function* () {})(); } },
+        };
+        // Before the guard this rejected and killed the whole plugin load.
+        await expect(ContextModePluginV2.setup(ctx)).resolves.toBeTypeOf("function");
+      } finally {
+        restore();
+      }
+      expect(lines.join("")).toContain('session.hook("context") registration failed');
+      expect(lines.join("")).toContain("boom");
+    });
+
+    it("warns once when the context event has no system array", async () => {
+      const captured = await createV2Plugin(join(tempDir, "bad-shape"));
+      const handler = captured.hooks.get("session:context")!;
+      const { lines, restore } = captureStderr();
+      try {
+        // Not an array — both injections would be skipped. Warn exactly once.
+        await handler({ sessionId: "v2-shape", system: "not-an-array" });
+        await handler({ sessionId: "v2-shape", system: "not-an-array" });
+        await handler({ sessionID: "v2-shape", system: 42 });
+      } finally {
+        restore();
+      }
+      expect(lines.join("")).toContain("event.system is not an array");
+      expect(lines.filter((l) => l.includes("event.system is not an array"))).toHaveLength(1);
+    });
+
+    it("warns unconditionally when native tool registration fails", async () => {
+      const temp = join(tempDir, "native-fail");
+      mkdirSync(temp, { recursive: true });
+      const { lines, restore } = captureStderr();
+      try {
+        const ctx: any = {
+          app: { version: "test-v2" },
+          location: { directory: temp, project: { id: "p", canonical: temp } },
+          options: {},
+          session: {
+            async hook(_name: string, _handler: HookHandler) {
+              return { dispose: async () => {} };
+            },
+          },
+          tool: {
+            async hook(_name: string, _handler: HookHandler) {
+              return { dispose: async () => {} };
+            },
+            async transform() {
+              throw new Error("editor rejected");
+            },
+          },
+          event: { subscribe() { return (async function* () {})(); } },
+        };
+        // setup must still resolve — a tool-registration failure must not
+        // break the other six registrations.
+        await expect(ContextModePluginV2.setup(ctx)).resolves.toBeTypeOf("function");
+      } finally {
+        restore();
+      }
+      expect(lines.join("")).toContain("native tool registration failed");
+      expect(lines.join("")).toContain("editor rejected");
+    });
+
+    it("warns per-tool when editor.add throws for a single tool", async () => {
+      const temp = join(tempDir, "native-add-fail");
+      mkdirSync(temp, { recursive: true });
+      const { lines, restore } = captureStderr();
+      try {
+        let addCallCount = 0;
+        const ctx: any = {
+          app: { version: "test-v2" },
+          location: { directory: temp, project: { id: "p", canonical: temp } },
+          options: {},
+          session: {
+            async hook(_name: string, _handler: HookHandler) {
+              return { dispose: async () => {} };
+            },
+          },
+          tool: {
+            async hook(_name: string, _handler: HookHandler) {
+              return { dispose: async () => {} };
+            },
+            async transform(editor: (e: any) => void) {
+              editor({
+                add(def: { name: string }) {
+                  addCallCount++;
+                  // Reject every tool — simulates a schema mismatch.
+                  throw new Error(`schema rejected for ${def.name}`);
+                },
+              });
+            },
+          },
+          event: { subscribe() { return (async function* () {})(); } },
+        };
+        // setup must still resolve — per-tool add failures must not bubble.
+        await expect(ContextModePluginV2.setup(ctx)).resolves.toBeTypeOf("function");
+        // Every ctx_* tool should have been attempted.
+        expect(addCallCount).toBeGreaterThanOrEqual(11);
+      } finally {
+        restore();
+      }
+      const all = lines.join("");
+      expect(all).toContain("editor.add failed");
+      expect(all).toContain("schema rejected");
+    });
+  });
+
   // ── tool.execute.before: routing enforcement ──────────
   // curl/wget handling is gated on the live MCP sentinel
   // (hooks/core/mcp-ready.mjs): when no live sentinel exists, routing

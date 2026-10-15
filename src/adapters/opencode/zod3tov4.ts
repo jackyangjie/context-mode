@@ -19,6 +19,21 @@ export function zod3ShapeToV4(shape: Record<string, unknown>, depth = 0): Record
   return result;
 }
 
+/**
+ * Convert a Zod 3 shape into a standard JSON Schema object.
+ *
+ * OpenCode V2's `ctx.tool.transform` / `editor.add` expects `input` to be a
+ * JSON Schema (`{ type: "object", properties: {...}, required: [...] }`),
+ * not a Zod schema. Passing a Zod v4 shape (`{ key: z.ZodType }`) causes every
+ * `editor.add` to throw; the inner catch silently swallowed it, leaving
+ * 0 tools registered with no warning.
+ */
+export function zod3ShapeToJsonSchema(shape: Record<string, unknown>): Record<string, unknown> {
+  const v4Shape = zod3ShapeToV4(shape);
+  const zodObject = z.object(v4Shape as Record<string, z.ZodType>);
+  return z.toJSONSchema(zodObject) as Record<string, unknown>;
+}
+
 function zod3ToV4(v: unknown, depth = 0): z.ZodType {
   if (depth > 10) return z.unknown();
   if (v == null || typeof v !== "object") return z.unknown();

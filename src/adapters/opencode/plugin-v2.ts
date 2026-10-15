@@ -77,7 +77,7 @@ import type { SessionEvent } from "../../types.js";
 import { OpenCodeAdapter } from "./index.js";
 import type { AdapterPlatformType } from "./index.js";
 import { PLATFORM_ENV_VARS } from "../detect.js";
-import { zod3ShapeToV4 } from "./zod3tov4.js";
+import { zod3ShapeToJsonSchema } from "./zod3tov4.js";
 import { systemHasRoutingInstructionsV2 as systemHasRoutingInstructions } from "./routing-utils.js";
 
 // ── V2 context / event types (loose — @opencode/plugin types not installed) ──
@@ -259,8 +259,22 @@ export const ContextModePluginV2 = {
   id: "context-mode",
 
   async setup(ctx: V2PluginContext): Promise<() => void> {
+    // OpenCode V2 gives plugins no working logging API. Verified against
+    // v2.0.29 with separate stdout/stderr/logfile capture:
+    //   console.log           → dropped everywhere
+    //   process.stdout.write  → dropped everywhere
+    //   ctx.app.log           → resolves without throwing but emits nothing
+    //                           (V2's OpenAPI exposes no app.log endpoint)
+    //   ~/.local/share/opencode/log/opencode.log → never captures plugin I/O
+    //   process.stderr.write  → the ONLY sink that actually reaches the user
+    // So severity messages route to stderr unconditionally. `dbg` stays gated
+    // but now also uses stderr, which is what makes OPENCODE_DEBUG meaningful
+    // at all (it was a no-op while it went through console.log).
+    const warn = (msg: string) => {
+      process.stderr.write(`[context-mode:opencode-v2] WARN ${msg}\n`);
+    };
     const dbg = (msg: string) => {
-      if (process.env.OPENCODE_DEBUG) console.log(`[context-mode:opencode-v2] ${msg}`);
+      if (process.env.OPENCODE_DEBUG) process.stderr.write(`[context-mode:opencode-v2] ${msg}\n`);
     };
 
     dbg(`loaded in OpenCode ${ctx?.app?.version ?? "?"} at ${ctx?.location?.directory ?? "?"}`);
@@ -302,12 +316,15 @@ export const ContextModePluginV2 = {
       routing = await findModule("hooks/core/routing.mjs");
       await (routing as { initSecurity?: (d: string) => Promise<unknown> }).initSecurity?.(buildRoot);
     } catch {
-      dbg(`routing init failed — enforcement degrades to passthrough`);
+      // Unconditional: routing enforcement is off, so Read/Bash/Write calls
+      // are no longer intercepted. Worth seeing without OPENCODE_DEBUG.
+      warn(`routing init failed — enforcement degrades to passthrough`);
       routing = null;
     }
     try {
       autoInjectionMod = await findModule("hooks/auto-injection.mjs");
     } catch {
+      warn(`auto-injection module missing — post-compact auto-injection disabled`);
       autoInjectionMod = null;
     }
 
@@ -323,7 +340,9 @@ export const ContextModePluginV2 = {
       });
       db.cleanupOldSessions(7);
     } catch (err) {
-      dbg(`SessionDB init failed: ${(err as Error).message}`);
+      // Unconditional: with no SessionDB there is no session capture, no
+      // resume snapshot and no auto-injection state anywhere in the plugin.
+      warn(`SessionDB init failed — session capture disabled: ${(err as Error).message}`);
       db = undefined;
     }
 
@@ -352,9 +371,9 @@ export const ContextModePluginV2 = {
     // ── Native tool registration (v2: ctx.tool.transform) ──────
     // v1 returned a `tool` map built from server.REGISTERED_CTX_TOOLS; v2
     // registers the same definitions through a synchronous transform editor.
-    // Tool schemas reuse the zod-v4 shape conversion (zod3ShapeToV4) that v1
-    // uses — the opencode host bundles zod v4 and consumes the shape the same
-    // way. execute() returns v2's { content } envelope.
+    // Tool schemas are converted to standard JSON Schema — OpenCode V2's
+    // editor.add expects `{ type:"object", properties:{...}, required:[...] }`,
+    // not a Zod schema. Passing Zod v4 shapes caused silent add failures.
     async function buildV2NativeTools(): Promise<
       Array<{ name: string; description: string; input: Record<string, unknown>; execute: (args: Record<string, unknown>) => Promise<{ content: string }> }>
     > {
@@ -379,7 +398,7 @@ export const ContextModePluginV2 = {
             : typeof inputSchema?._def?.shape === "function"
               ? (inputSchema._def.shape as () => unknown)()
               : {};
-        const argsForHost = zod3ShapeToV4(shape as Record<string, unknown>);
+        const argsForHost = zod3ShapeToJsonSchema(shape as Record<string, unknown>);
         out.push({
           name: registered.name,
           description: String(config.description ?? ""),
@@ -424,15 +443,19 @@ export const ContextModePluginV2 = {
           for (const t of nativeTools) {
             try {
               editor.add?.(t);
-            } catch {
-              // Skip a single tool whose schema the editor rejects.
+            } catch (err) {
+              warn(`editor.add failed for ${t.name}: ${(err as Error).message}`);
             }
           }
         });
         dbg(`registered ${nativeTools.length} native ctx_* tools via ctx.tool.transform`);
       } catch (err) {
-        dbg(`native tool registration failed: ${(err as Error).message}`);
+        // Unconditional: no native ctx_* tools means every tool call the user
+        // types is unavailable unless they separately wired an MCP stdio entry.
+        warn(`native tool registration failed — no ctx_* tools available: ${(err as Error).message}`);
       }
+    } else {
+      warn(`ctx.tool.transform unavailable — no ctx_* tools registered`);
     }
 
     // ── tool.execute.before: routing enforcement (v1 OC routing) ────
@@ -600,37 +623,67 @@ export const ContextModePluginV2 = {
     // (unchanged from the verified skeleton — the one v2 hook confirmed
     // against opencode v2.0.27 at runtime.) Registered last so the ordering
     // matches the v1 Hooks map (system.transform is the final entry).
-    await ctx.session.hook("context", async (event) => {
-      const sessionId = event?.sessionId ?? event?.sessionID;
-      if (!sessionId || !Array.isArray(event.system)) return;
-
-      const system = event.system;
-
-      // Step 1 — ROUTING_BLOCK injection (mirrors v1 plugin.ts OC-1).
-      // Dedup by a quorum of ROUTING_MARKERS so we don't duplicate when the
-      // host already injected rules via AGENTS.md or a prior turn.
-      if (!systemHasRoutingInstructions(system) && routingBlock) {
-        system.splice(1, 0, { type: "text" as const, text: routingBlock });
-        dbg(`routing block injected for session ${sessionId}`);
-      } else if (process.env.OPENCODE_DEBUG) {
-        dbg(`routing block skipped for ${sessionId} (already present)`);
-      }
-
-      // Step 2 — resume snapshot claim (mirrors v1 plugin.ts OC-3).
-      // Atomic claim (UPDATE ... WHERE consumed_at IS NULL ORDER BY
-      // created_at DESC LIMIT 1); sessionId excludes self-injection (#376).
-      if (db) {
-        try {
-          const row = db.claimLatestUnconsumedResume(sessionId);
-          if (row?.snapshot) {
-            system.splice(1, 0, { type: "text" as const, text: row.snapshot });
-            dbg(`resume snapshot claimed from session ${row.sessionId} into ${sessionId}`);
+    //
+    // Every other registration in this file is guarded. This one was the
+    // exception: a missing ctx.session or a throwing hook() would reject
+    // setup() and fail the whole plugin load, losing the 6 hooks above it.
+    if (ctx.session?.hook) {
+      let warnedSystemShape = false;
+      try {
+        await ctx.session.hook("context", async (event) => {
+          const sessionId = event?.sessionId ?? event?.sessionID;
+          if (!sessionId) return;
+          // v2 does not document the context event shape exhaustively. If
+          // `system` is not an array here, BOTH injections below are skipped
+          // and the hook looks healthy while doing nothing — the worst kind
+          // of failure. Warn exactly once so it cannot spam every request.
+          if (!Array.isArray(event.system)) {
+            if (!warnedSystemShape) {
+              warnedSystemShape = true;
+              warn(`context hook: event.system is not an array ` +
+                `(${Array.isArray(event) ? "event is an array" : typeof event}) — ` +
+                `routing block and resume snapshot injection disabled`);
+            }
+            return;
           }
-        } catch (err) {
-          dbg(`resume claim failed: ${(err as Error).message}`);
-        }
+
+          const system = event.system;
+
+          // Step 1 — ROUTING_BLOCK injection (mirrors v1 plugin.ts OC-1).
+          // Dedup by a quorum of ROUTING_MARKERS so we don't duplicate when the
+          // host already injected rules via AGENTS.md or a prior turn.
+          if (!systemHasRoutingInstructions(system) && routingBlock) {
+            system.splice(1, 0, { type: "text" as const, text: routingBlock });
+            dbg(`routing block injected for session ${sessionId}`);
+          } else if (process.env.OPENCODE_DEBUG) {
+            dbg(`routing block skipped for ${sessionId} (already present)`);
+          }
+
+          // Step 2 — resume snapshot claim (mirrors v1 plugin.ts OC-3).
+          // Atomic claim (UPDATE ... WHERE consumed_at IS NULL ORDER BY
+          // created_at DESC LIMIT 1); sessionId excludes self-injection (#376).
+          if (db) {
+            try {
+              const row = db.claimLatestUnconsumedResume(sessionId);
+              if (row?.snapshot) {
+                system.splice(1, 0, { type: "text" as const, text: row.snapshot });
+                dbg(`resume snapshot claimed from session ${row.sessionId} into ${sessionId}`);
+              }
+            } catch (err) {
+              dbg(`resume claim failed: ${(err as Error).message}`);
+            }
+          }
+        });
+      } catch (err) {
+        // Unconditional: without this hook the routing block and resume
+        // snapshots are never injected, and this is the substitute for the
+        // SessionStart hook OpenCode does not provide.
+        warn(`session.hook("context") registration failed — routing block and ` +
+          `resume injection disabled: ${(err as Error).message}`);
       }
-    });
+    } else {
+      warn(`ctx.session.hook unavailable — routing block and resume injection disabled`);
+    }
 
     // Cleanup: called by the v2 loader on plugin unload. Hook/transform
     // registrations are scoped to the plugin and dispose automatically; the

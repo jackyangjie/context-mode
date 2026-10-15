@@ -123,8 +123,43 @@ jobs:
     name: tier2-smoke (opencode)
     timeout-minutes: 15
     steps:
-      - name: Placeholder
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies and build
         run: |
-          echo "OpenCode tier-2 smoke not yet implemented." >&2
-          echo "Tracked in #477. Land Pi first." >&2
-          exit 0
+          npm ci
+          npm run build
+          npm rebuild better-sqlite3
+
+      - name: Install OpenCode
+        run: |
+          # OpenCode V2 is NOT on npm: `opencode-ai` tops out at 1.19.0, which
+          # is the V1 line. V2 ships only via the official installer script,
+          # which drops the binary at $HOME/.opencode/bin/opencode.
+          # TODO(#477): pin a V2 version once the installer publishes a
+          # versioned endpoint; for now capture the version into the log.
+          curl -fsSL https://opencode.ai/v2/install | bash
+          export PATH="$HOME/.opencode/bin:$PATH"
+          if ! command -v opencode >/dev/null 2>&1; then
+            echo "FATAL  opencode binary not on PATH after install" >&2
+            exit 2
+          fi
+          opencode --version
+
+      - name: Run tier-2 smoke
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ env.ANTHROPIC_MODEL }}
+        run: bash scripts/tier2-smoke/run-opencode-smoke.sh
+
+      - name: Upload OpenCode logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-opencode-logs
+          path: ${{ runner.temp }}/tier2-smoke-opencode/
+          if-no-files-found: ignore

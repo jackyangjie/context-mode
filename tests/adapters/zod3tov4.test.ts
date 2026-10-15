@@ -1,7 +1,7 @@
 import "../setup-home";
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { zod3ShapeToV4 } from "../../src/adapters/opencode/zod3tov4.js";
+import { zod3ShapeToV4, zod3ShapeToJsonSchema } from "../../src/adapters/opencode/zod3tov4.js";
 
 describe("zod3ShapeToV4", () => {
   it("converts a flat Zod 3 shape to Zod v4", () => {
@@ -178,5 +178,80 @@ describe("zod3ShapeToV4", () => {
         `${key} is missing _zod`,
       ).toBeDefined();
     }
+  });
+});
+
+describe("zod3ShapeToJsonSchema", () => {
+  it("produces a standard JSON Schema object with type: object", () => {
+    const z3Shape = {
+      name: z.string(),
+      limit: z.number(),
+    };
+    const result = zod3ShapeToJsonSchema(z3Shape as Record<string, unknown>);
+
+    expect(result.type).toBe("object");
+    expect(result).toHaveProperty("properties");
+    expect(result).toHaveProperty("required");
+    expect((result.properties as any).name).toEqual({ type: "string" });
+    expect((result.properties as any).limit).toEqual({ type: "number" });
+  });
+
+  it("excludes optional fields from required; defaulted fields stay required", () => {
+    const z3Shape = {
+      required: z.string(),
+      optional: z.string().optional(),
+      defaulted: z.boolean().default(false),
+    };
+    const result = zod3ShapeToJsonSchema(z3Shape as Record<string, unknown>);
+
+    const required = result.required as string[];
+    // .optional() → not required. .default() → still required (value always
+    // present after parse; only the input may omit it).
+    expect(required).toContain("required");
+    expect(required).toContain("defaulted");
+    expect(required).not.toContain("optional");
+  });
+
+  it("converts enum values to JSON Schema enum", () => {
+    const z3Shape = { lang: z.enum(["js", "ts", "py"]) };
+    const result = zod3ShapeToJsonSchema(z3Shape as Record<string, unknown>);
+
+    expect((result.properties as any).lang).toEqual({
+      type: "string",
+      enum: ["js", "ts", "py"],
+    });
+  });
+
+  it("preserves descriptions as JSON Schema description", () => {
+    const z3Shape = { name: z.string().describe("User name") };
+    const result = zod3ShapeToJsonSchema(z3Shape as Record<string, unknown>);
+
+    expect((result.properties as any).name.description).toBe("User name");
+  });
+
+  it("includes additionalProperties: false on the object schema", () => {
+    const z3Shape = { name: z.string() };
+    const result = zod3ShapeToJsonSchema(z3Shape as Record<string, unknown>);
+
+    expect(result.additionalProperties).toBe(false);
+  });
+
+  it("handles array fields with items", () => {
+    const z3Shape = { tags: z.array(z.string()) };
+    const result = zod3ShapeToJsonSchema(z3Shape as Record<string, unknown>);
+
+    expect((result.properties as any).tags).toEqual({
+      type: "array",
+      items: { type: "string" },
+    });
+  });
+
+  it("returns an empty object schema for an empty shape", () => {
+    const result = zod3ShapeToJsonSchema({});
+
+    expect(result.type).toBe("object");
+    expect(result.properties).toEqual({});
+    // zod v4 toJSONSchema omits `required` when there are no required fields.
+    expect(result.required ?? []).toEqual([]);
   });
 });

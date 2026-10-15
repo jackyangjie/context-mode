@@ -503,6 +503,28 @@ Full configs: [`configs/cursor/hooks.json`](configs/cursor/hooks.json) | [`confi
 
 Full configs: [`configs/opencode/opencode.json`](configs/opencode/opencode.json) | [`configs/opencode/AGENTS.md`](configs/opencode/AGENTS.md)
 
+**Local development (loading an unpublished build):**
+
+OpenCode has no `.opencode-plugin/` manifest directory and no other manifest convention — the two supported install surfaces are an npm package name in the `plugin`/`plugins` config array, and auto-discovery of files under `.opencode/plugins/`. That directory is the only way to load a local build: archive paths are rejected, so a built tarball is not a valid target.
+
+```bash
+npm ci && npm run build
+mkdir -p .opencode/plugins
+cp plugin.bundle.mjs .opencode/plugins/context-mode.js
+cp -r hooks .opencode/plugins/hooks
+opencode run --standalone --print-logs --log-level debug "say hi"
+```
+
+Three things worth knowing:
+
+- **`hooks/` is mandatory, not optional.** `setup()` imports `hooks/core/routing.mjs` and `hooks/auto-injection.mjs` relative to the bundle's own directory. Ship the bundle alone and the plugin loads *successfully* while routing enforcement is silently off — `ctx_*` tools still work, but `tool.execute.before` never fires. The loader does not surface this; it appears only as a plugin warning.
+- **Plugin diagnostics go to stderr, and only stderr.** V2 exposes no working logging API to plugins: `console.log`, `process.stdout.write`, and `ctx.app.log` all resolve without emitting anything, and `~/.local/share/opencode/log/opencode.log` never captures plugin output. Warnings therefore go to `process.stderr`, gated by nothing; verbose `OPENCODE_DEBUG` tracing does too. Set `OPENCODE_DEBUG=1` for the full trace.
+- **Isolate config per test run.** OpenCode resolves config from `$OPENCODE_CONFIG_DIR` if set, else `$HOME/.config/opencode`. `XDG_CONFIG_HOME` is ignored. Use `env -u OPENCODE_CONFIG_DIR HOME=/tmp/scratch ...` so a test run never touches a real profile. Note that OpenCode V2 is not on npm — `opencode-ai` tops out at the V1 line — so install V2 with `curl -fsSL https://opencode.ai/v2/install | bash`.
+
+OpenCode also accepts the singular `plugin` key shown above; V2 normalizes it to `plugins`. Either form works.
+
+The end-to-end smoke at [`scripts/tier2-smoke/run-opencode-smoke.sh`](scripts/tier2-smoke/run-opencode-smoke.sh) asserts all of the above against a real V2 runtime: the bundle loaded, no load failure, and no capability-degradation warning.
+
 </details>
 
 <details>
