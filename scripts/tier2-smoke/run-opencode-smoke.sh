@@ -194,6 +194,21 @@ if grep -Eq '\[context-mode:opencode-v2\] WARN' "$OC_LOG"; then
   grep -E '\[context-mode:opencode-v2\] WARN' "$OC_LOG" | sed 's/^/         /'
 fi
 
+# HARD 5 — a ctx_* tool was actually invoked by the model. Layers 1–4 prove
+# the plugin loaded and setup() did not degrade; they cannot prove the 11
+# native ctx_* tools were registered at all. OpenCode V2's editor.add silently
+# rejects a schema it doesn't understand, so a build whose input schema was
+# malformed loads cleanly, logs no WARN, yet exposes zero tools to the model.
+#
+# The fixture deliberately never writes the underscore form `ctx_stats` (it
+# only references the slash form `/ctx-stats`), so a `ctx_stats` match can only
+# come from a model-issued tool call, never a fixture echo. Grepping that
+# single tool is the tightest layer-3 signal that does not depend on the log
+# shape of arbitrary tool names (the SOFT block below still counts the rest).
+hard "model invoked a ctx_* tool (layer 3)" \
+  "$(grep -Eq 'ctx_stats' "$OC_LOG" && echo 1 || echo 0)" \
+  "no ctx_stats tool-call in server log — the native tools were not registered (editor.add input-schema mismatch)"
+
 # SOFT — did the model actually use any ctx_* tool? Counted from the log.
 # `|| true` keeps grep's no-match exit from tripping `set -e` mid-report.
 CTX_HITS="$(grep -oE 'ctx_(search|execute|index)' "$OC_LOG" | wc -l | tr -d ' ' || true)"
