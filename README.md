@@ -493,7 +493,29 @@ Full configs: [`configs/cursor/hooks.json`](configs/cursor/hooks.json) | [`confi
 
 3. Restart OpenCode.
 
-**Verify:** In the OpenCode session, type `ctx stats`. Context-mode tools should appear and respond.
+**Verify:** Ask the model to call `ctx_stats` (or use `/ctx-stats` — see **Slash commands** below). A tool result with session stats should come back. Note that `/ctx-stats` is a *prompt template*, not a direct tool call: OpenCode V2 expands the command body into a user prompt and the model invokes the underlying `ctx_stats` tool.
+
+**Upgrade note:** If an existing config has BOTH `plugin: ["context-mode"]` AND `mcp.context-mode`, OpenCode will register zero `ctx_*` tools — the plugin path correctly suppresses MCP duplicates, but the legacy MCP entry confuses the loader. Run `context-mode upgrade` to remove the legacy `mcp.context-mode` entry; your other MCP servers are preserved. v1.0.140+ emits a stderr diagnostic with the same guidance when this happens.
+
+**Slash commands (v1.0.170+):** context-mode ships 8 OpenCode command templates under [`configs/opencode/commands/`](configs/opencode/commands/). The OpenCode adapter's `configureAllHooks()` syncs them to your global commands dir (`~/.config/opencode/commands/`) on `context-mode upgrade`, so `/ctx-*` is available without manual copying:
+
+| Command | Triggers tool |
+|---|---|
+| `/ctx-stats` | `ctx_stats` |
+| `/ctx-doctor` | `ctx_doctor` |
+| `/ctx-upgrade` | `ctx_upgrade` |
+| `/ctx-search <query>` | `ctx_search` |
+| `/ctx-index <path>` | `ctx_index` |
+| `/ctx-fetch <url>` | `ctx_fetch_and_index` |
+| `/ctx-insight` | `ctx_insight` |
+| `/ctx-purge` | `ctx_purge` |
+
+The three execution tools (`ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) have no command templates because they need multi-line code arguments that don't fit a prompt template. To install the commands manually (without running `context-mode upgrade`), copy the `.md` files:
+
+```bash
+mkdir -p ~/.config/opencode/commands
+cp node_modules/@jackyangjie/context-mode/configs/opencode/commands/*.md ~/.config/opencode/commands/
+```
 
 **Upgrade note:** If an existing config has BOTH `plugin: ["context-mode"]` AND `mcp.context-mode`, OpenCode will register zero `ctx_*` tools — the plugin path correctly suppresses MCP duplicates, but the legacy MCP entry confuses the loader. Run `context-mode upgrade` to remove the legacy `mcp.context-mode` entry; your other MCP servers are preserved. v1.0.140+ emits a stderr diagnostic with the same guidance when this happens.
 
