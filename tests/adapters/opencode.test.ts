@@ -1,6 +1,6 @@
 import "../setup-home";
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, parse, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -595,6 +595,49 @@ describe("OpenCodeAdapter", () => {
         expect(JSON.parse(run.stdout)).toEqual(["Added context-mode to plugin array"]);
         expect(() => readFileSync(resolve(dir, "opencode.json"), "utf-8")).toThrow();
         expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual({ plugin: ["context-mode"] });
+
+        rmSync(root, { recursive: true, force: true });
+      });
+
+      it("configureAllHooks syncs OpenCode command templates from plugin root to global commands dir", () => {
+        const root = mkdtempSync(join(tmpdir(), "opencode-cmds-"));
+        const home = join(root, "home");
+        const confDir = join(home, ".config", "opencode");
+        const pluginRoot = join(root, "plugin");
+        const srcCmds = join(pluginRoot, "configs", "opencode", "commands");
+        mkdirSync(srcCmds, { recursive: true });
+        writeFileSync(join(srcCmds, "ctx-stats.md"), "---\ndescription: stats\n---\nCall ctx_stats.\n");
+        writeFileSync(join(srcCmds, "ctx-search.md"), "---\ndescription: search\n---\nCall ctx_search $ARGUMENTS\n");
+        writeFileSync(join(srcCmds, "not-a-command.txt"), "should not be copied");
+        const cfgDir = join(confDir, "commands");
+
+        const src = resolve(process.cwd(), "src", "adapters", "opencode", "index.ts");
+        const tsx = resolve(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+        const dir = join(root, "project");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "opencode.json"), JSON.stringify({ plugin: [] }, null, 2) + "\n");
+        const run = spawnSync(
+          process.execPath,
+          [
+            tsx,
+            "-e",
+            `import { OpenCodeAdapter } from ${JSON.stringify(src)};const a=new OpenCodeAdapter();console.log(JSON.stringify(a.configureAllHooks(${JSON.stringify(pluginRoot)})))`,
+          ],
+          {
+            cwd: dir,
+            env: env(home),
+            encoding: "utf-8",
+          },
+        );
+
+        expect(run.status).toBe(0);
+        const changes = JSON.parse(run.stdout) as string[];
+        expect(changes).toContain("Synced 2 OpenCode command templates to " + cfgDir);
+        expect(existsSync(join(cfgDir, "ctx-stats.md"))).toBe(true);
+        expect(existsSync(join(cfgDir, "ctx-search.md"))).toBe(true);
+        expect(existsSync(join(cfgDir, "not-a-command.txt"))).toBe(false);
+        const content = readFileSync(join(cfgDir, "ctx-stats.md"), "utf-8");
+        expect(content).toContain("Call ctx_stats");
 
         rmSync(root, { recursive: true, force: true });
       });

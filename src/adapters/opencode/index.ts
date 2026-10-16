@@ -21,6 +21,7 @@ import {
   writeFileSync,
   mkdirSync,
   copyFileSync,
+  readdirSync,
   accessSync,
   existsSync,
   constants,
@@ -495,7 +496,7 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
 
   // ── Upgrade ────────────────────────────────────────────
 
-  configureAllHooks(_pluginRoot: string): string[] {
+  configureAllHooks(pluginRoot: string): string[] {
     const settings = this.readSettings() ?? {};
     const changes: string[] = [];
 
@@ -521,6 +522,28 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
     }
 
     this.writeSettings(settings);
+
+    // Sync OpenCode slash command templates from the installed plugin to the
+    // user's global commands dir. OpenCode V2 discovers commands from
+    // ~/.config/opencode/commands/*.md (global) or .opencode/commands/*.md
+    // (project). The npm package ships them under configs/opencode/commands/.
+    // Without this step /ctx-* is unavailable after install — the plugin
+    // registers tools natively but commands are a separate discovery surface.
+    const srcDir = join(pluginRoot, "configs", "opencode", "commands");
+    if (existsSync(srcDir)) {
+      const destDir = join(this.getConfigDir(), "commands");
+      mkdirSync(destDir, { recursive: true });
+      try {
+        const files = readdirSync(srcDir).filter((f) => f.endsWith(".md"));
+        for (const f of files) {
+          copyFileSync(join(srcDir, f), join(destDir, f));
+        }
+        if (files.length > 0) {
+          changes.push(`Synced ${files.length} OpenCode command templates to ${destDir}`);
+        }
+      } catch { /* best effort — never block upgrade */ }
+    }
+
     return changes;
   }
 
